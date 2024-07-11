@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multiplayer Space FPS</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: Arial, sans-serif; }
+        canvas { display: block; }
+        #crosshair {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            width: 20px;
+            height: 20px;
+            border: 2px solid white;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            display: none;
+        }
+        #game-ui {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-size: 20px;
+            display: none;
+        }
+        #player-list {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            color: white;
+            font-size: 16px;
+        }
+        #title-screen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.8);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: white;
+        }
+        #title-screen h1 {
+            font-size: 48px;
+            margin-bottom: 20px;
+        }
+        .start-button {
+            font-size: 24px;
+            padding: 10px 20px;
+            margin: 10px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        #player-name-input {
+            font-size: 18px;
+            padding: 5px;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="crosshair"></div>
+    <div id="game-ui">
+        <div id="score-display">Score: 0</div>
+    </div>
+    <div id="player-list"></div>
+    <div id="title-screen">
+        <h1>Multiplayer Space FPS</h1>
+        <input type="text" id="player-name-input" placeholder="Enter your name">
+        <button id="start-game" class="start-button">Join Game</button>
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        let scene, camera, renderer, playerMesh, otherPlayers = {}, socket;
+        let gameStarted = false;
+        let score = 0;
+        let playerName = "";
+
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            renderer = new THREE.WebGLRenderer();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            camera.position.set(0, 0, 5);
+
+            document.addEventListener('mousemove', onMouseMove);
+            document.addEventListener('click', onMouseClick);
+            window.addEventListener('resize', onWindowResize);
+
+            document.getElementById('start-game').addEventListener('click', startGame);
+
+            createEnvironment();
+            animate();
+        }
+
+        function startGame() {
+            playerName = document.getElementById('player-name-input').value;
+            if (!playerName) {
+                alert("Please enter a name!");
+                return;
+            }
+
+            gameStarted = true;
+            document.getElementById('title-screen').style.display = 'none';
+            document.getElementById('crosshair').style.display = 'block';
+            document.getElementById('game-ui').style.display = 'block';
+            renderer.domElement.requestPointerLock();
+
+            playerMesh = createPlayerMesh();
+            scene.add(playerMesh);
+
+            connectToServer();
+        }
+
+        function createEnvironment() {
+            scene.background = new THREE.Color(0x000000);
+            const starGeometry = new THREE.BufferGeometry();
+            const starMaterial = new THREE.PointsMaterial({ color: 0xFFFFFF });
+            const starVertices = [];
+            for (let i = 0; i < 10000; i++) {
+                const x = (Math.random() - 0.5) * 2000;
+                const y = (Math.random() - 0.5) * 2000;
+                const z = -Math.random() * 2000;
+                starVertices.push(x, y, z);
+            }
+            starGeometry.setAttribute('position', new THREE.Float32BufferAttribute(starVertices, 3));
+            const stars = new THREE.Points(starGeometry, starMaterial);
+            scene.add(stars);
+        }
+
+        function createPlayerMesh() {
+            const geometry = new THREE.BoxGeometry(1, 1, 1);
+            const material = new THREE.MeshBasicMaterial({ color: 0x00ff00 });
+            return new THREE.Mesh(geometry, material);
+        }
+
+        function onMouseMove(event) {
+            if (gameStarted && document.pointerLockElement === renderer.domElement) {
+                const movementX = event.movementX || event.mozMovementX || event.webkitMovementX || 0;
+                const movementY = event.movementY || event.mozMovementY || event.webkitMovementY || 0;
+
+                camera.rotation.y -= movementX * 0.002;
+                camera.rotation.x -= movementY * 0.002;
+
+                camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, camera.rotation.x));
+
+                if (playerMesh) {
+                    playerMesh.rotation.y = camera.rotation.y;
+                    socket.send(JSON.stringify({
+                        type: 'move',
+                        position: playerMesh.position,
+                        rotation: playerMesh.rotation
+                    }));
+                }
+            }
+        }
+
+        function onMouseClick() {
+            if (gameStarted && document.pointerLockElement === renderer.domElement) {
+                const bullet = new THREE.Mesh(
+                    new THREE.SphereGeometry(0.1, 8, 8),
+                    new THREE.MeshBasicMaterial({ color: 0xFFFF00 })
+                );
+                bullet.position.set(playerMesh.position.x, playerMesh.position.y, playerMesh.position.z);
+                
+                const direction = new THREE.Vector3();
+                camera.getWorldDirection(direction);
+                bullet.velocity = direction.multiplyScalar(0.5);
+                
+                scene.add(bullet);
+
+                socket.send(JSON.stringify({
+                    type: 'shoot',
+                    position: bullet.position,
+                    velocity: bullet.velocity
+                }));
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function connectToServer() {
+            socket = new WebSocket('ws://localhost:8080');
+
+            socket.onopen = function() {
+                console.log('Connected to server');
+                socket.send(JSON.stringify({
+                    type: 'join',
+                    name: playerName
+                }));
+            };
+
+            socket.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                handleServerMessage(data);
+            };
+
+            socket.onclose = function() {
+                console.log('Disconnected from server');
+                // Handle disconnection (e.g., show a message to the user)
+            };
+        }
+
+        function handleServerMessage(data) {
+            switch(data.type) {
+                case 'playerJoined':
+                    addPlayer(data.id, data.name);
+                    break;
+                case 'playerLeft':
+                    removePlayer(data.id);
+                    break;
+                case 'updatePlayers':
+                    updatePlayers(data.players);
+                    break;
+                case 'bullet':
+                    createBullet(data.position, data.velocity);
+                    break;
+            }
+        }
+
+        function addPlayer(id, name) {
+            if (!otherPlayers[id]) {
+                const playerMesh = createPlayerMesh();
+                scene.add(playerMesh);
+                otherPlayers[id] = { mesh: playerMesh, name: name };
+                updatePlayerList();
+            }
+        }
+
+        function removePlayer(id) {
+            if (otherPlayers[id]) {
+                scene.remove(otherPlayers[id].mesh);
+                delete otherPlayers[id];
+                updatePlayerList();
+            }
+        }
+
+        function updatePlayers(players) {
+            for (const id in players) {
+                if (id !== socket.id) {
+                    if (!otherPlayers[id]) {
+                        addPlayer(id, players[id].name);
+                    }
+                    otherPlayers[id].mesh.position.copy(players[id].position);
+                    otherPlayers[id].mesh.rotation.copy(players[id].rotation);
+                }
+            }
+        }
+
+        function createBullet(position, velocity) {
+            const bullet = new THREE.Mesh(
+                new THREE.SphereGeometry(0.1, 8, 8),
+                new THREE.MeshBasicMaterial({ color: 0xFF0000 })
+            );
+            bullet.position.copy(position);
+            bullet.velocity = new THREE.Vector3().copy(velocity);
+            scene.add(bullet);
+        }
+
+        function updatePlayerList() {
+            const playerList = document.getElementById('player-list');
+            playerList.innerHTML = '<h3>Players:</h3>';
+            for (const id in otherPlayers) {
+                playerList.innerHTML += `<div>${otherPlayers[id].name}</div>`;
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            if (gameStarted) {
+                scene.children.forEach(object => {
+                    if (object.velocity) {
+                        object.position.add(object.velocity);
+                        if (object.position.distanceTo(camera.position) > 100) {
+                            scene.remove(object);
+                        }
+                    }
+                });
+
+                // Update player position based on camera
+                if (playerMesh) {
+                    playerMesh.position.copy(camera.position);
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        init();
+    </script>
+</body>
+</html>
